@@ -9,14 +9,46 @@ The companion writeup is on Medium: **[Deploying OpenVLA-7B on a Shared HPC Serv
 
 ## Status
 
-This is a documentation repository, not a runnable codebase. The source code I wrote during the internship lived on the centre's GPU server and I don't have a copy. What's here:
+The inference script and dataset explorer are now in `scripts/`, verified working as of June 2026. The notes, model comparison, and debugging trail are in `docs/` and `snippets/` as before.
 
+What's here:
+
+- `scripts/run_openvla.py` — the working inference script, confirmed producing correct output on an RTX A6000
+- `scripts/dataview.py` — ALOHA HDF5 dataset explorer
+- `scripts/environment.yml` — pinned conda environment (see the June 2026 update below for why this matters)
 - A comparative analysis across eight VLA models
 - The hybrid TinyVLA + RoboMamba architecture I proposed
 - The infrastructure debugging trail: cache redirection, FlashAttention symbol failures, MiniVLA patches
-- Lessons that generalise to anyone trying to deploy a 7B model on a constrained shared server
+- Lessons that generalise to anyone deploying a 7B model on a constrained shared server
 
-The fine-tune didn't complete inside the internship window. I'm honest about that in `docs/07-lessons-learned.md`. The infrastructure work that got us to a launched training run is the substance.
+The fine-tune didn't complete inside the internship window. I'm honest about that in `docs/07-lessons-learned.md`. Training did run: checkpoints exist at steps 70 through 12,366 (roughly 6% of the planned 200k-step run) before the internship ended.
+
+## June 2026 update: inference verified, code recovered
+
+I regained SSH access to the server a year after the internship ended and retrieved the scripts. Running `run_openvla.py` on the current environment hit three separate failures before producing output. All three are worth knowing about if you work with this stack.
+
+**NumPy 2.x ABI break.** TensorFlow in the environment was compiled against NumPy 1.x. NumPy had drifted to 2.1.2 over the year. Fix: `pip install "numpy<2" --force-reinstall`.
+
+**PyTorch / torchvision version mismatch.** PyTorch had updated to 2.7.1 but torchvision was still pinned to an older release, causing `torchvision::nms does not exist` on import. Fix: `pip install torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu126`.
+
+**LLaMA attention mask off-by-one on PyTorch 2.7.1.** PyTorch 2.7.1 changed how attention weights are shaped during generation, producing a tensor size mismatch (276 vs 275) in the causal mask addition. The fix is a two-line patch to `transformers/models/llama/modeling_llama.py`:
+
+```python
+# Replace: attn_weights = attn_weights + causal_mask
+# With:
+min_len = min(attn_weights.size(-1), causal_mask.size(-1))
+attn_weights = attn_weights[..., :min_len] + causal_mask[..., :min_len]
+```
+
+Hardware note: the server now has RTX 5090s (Blackwell, sm_120). PyTorch 2.7.1 tops out at sm_90. The 5090s show up in `nvidia-smi` but PyTorch cannot use them. Use an Ampere or Ada GPU instead (`cuda:1` on this machine).
+
+After those fixes:
+
+```
+Predicted Action: [-0.0035639  -0.0030142  -0.00959495 -0.01801952  0.02132494 -0.05164425  0.99607843]
+```
+
+Seven numbers. Six end-effector deltas and a gripper command (0.996 = open). Correct output format for `bridge_orig`.
 
 ## What we were trying to do
 
@@ -41,11 +73,29 @@ Model weights were public. Codebase was open. Hardware was there. The interestin
 
 If you only take one thing from this repo, take the cache-redirection pattern in `snippets/cache-redirect.sh`. Five minutes of setup saves a week of partial downloads on a 95%-full root partition.
 
+## Quick start
+
+```bash
+git clone https://github.com/Vishesh062/openvla-hpc-deployment-notes.git
+cd openvla-hpc-deployment-notes
+conda env create -f scripts/environment.yml
+conda activate openvla
+cd scripts
+python run_openvla.py
+```
+
+Requires a CUDA GPU with at least 15 GB free, sm_50 through sm_90. If `cuda:0` is a Blackwell card, set `DEVICE = "cuda:1"` at the top of the script.
+
 ## Repository contents
 
 ```
 .
 ├── README.md
+├── scripts/
+│   ├── run_openvla.py             verified inference script
+│   ├── dataview.py                ALOHA HDF5 dataset explorer
+│   ├── environment.yml            pinned conda environment (June 2026)
+│   └── exampleimage.jpeg          example input image for run_openvla.py
 ├── docs/
 │   ├── 01-project-overview.md             scope, organisation, team
 │   ├── 02-vla-model-comparison.md         the 8-model comparative analysis
